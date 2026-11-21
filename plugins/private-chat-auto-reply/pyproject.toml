@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wechat-ai-private-chat-auto-reply"
+version = "0.1.0"
+description = "Optional automatic text replies for a configured WeChat private chat"
+requires-python = ">=3.12"
+dependencies = ["wechat-ai-bot>=0.1.0"]
+
+[project.entry-points."wechat_ai.plugins"]
+private-chat-auto-reply = "private_chat_auto_reply:PrivateChatAutoReplyPlugin"
+
+[tool.setuptools]
+py-modules = ["private_chat_auto_reply", "private_chat_invitations", "wechat_invite_admission"]

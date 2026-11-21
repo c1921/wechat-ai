@@ -65,11 +65,11 @@ rpa:
     align_factor: 28
   # Physical pixels from the detected input separator to the window bottom,
   # including the toolbar. Adjust if using a custom editor height/scale.
-  # Invalid layouts stay unready and are retried by the bot initialization loop.
+  # Invalid layouts stay unready while the window monitor retries calibration.
   layout:
     min_input_height: 100
     max_input_height: 200
-    # Open this exact local search result only on the empty welcome pane at startup.
+    # Recover from the welcome pane using this exact visible chat or local search result.
     # Use the displayed name for your client language; empty string disables this.
     # The title and layout must both be verified. No message is sent.
     startup_session: "文件传输助手"
@@ -126,6 +126,15 @@ plugins:
   block-empty-room-plugin:
     enabled: true
     priority: 2000
+  private-chat-auto-reply:
+    enabled: false
+    invitations_enabled: false
+    contact_usernames: []
+    ssh_host: ""
+    ssh_user: reply-bridge
+    ssh_directory: /run/private-chat-auto-reply-ssh
+    state_directory: /config/private-chat-auto-reply
+    conversation_namespace: wechat-private-chat-auto-reply
 
 # OpenAI / LLM configuration (for AI reply plugins)
 openai:
