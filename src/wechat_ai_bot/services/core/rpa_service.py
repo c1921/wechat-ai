@@ -149,7 +149,7 @@ class RPAService:
                             if not result["ok"]:
                                 self.logger.error(
                                     "RPA action %s failed: %s. %s",
-                                    task.action_id, result.get("error"), NO_RETRY,
+                                    task.action_id, result.get("error"), result["guidance"],
                                 )
                             try:
                                 result_queue = getattr(task, "result_queue", None)

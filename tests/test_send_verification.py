@@ -257,6 +257,58 @@ def test_unavailable_database_prevents_click(db, monkeypatch):
     handler.execute.assert_not_called()
 
 
+def test_unready_first_reply_is_terminal_and_only_new_action_sends(db, monkeypatch):
+    def send(action):
+        db.get_messages_by_username.return_value = [row()]
+        return True
+
+    handler = SimpleNamespace(execute=Mock(side_effect=send))
+    controller = controller_for(db, handler, monkeypatch)
+    controller.window_manager.ensure_action_ready = Mock(return_value=False)
+    controller.window_manager.get_readiness = lambda: {
+        "wechat_process_running": True,
+        "login_state": "logged_in",
+        "ui_send_ready": False,
+        "reason": "layout_unavailable",
+    }
+    controller._can_send_message = Mock(return_value=True)
+    queue = Queue()
+    service = RPAService(queue, controller)
+    dispatcher = QueueCommandDispatcher(SimpleNamespace(rpa_task_queue=queue, rpa_service=service), db.user_info)
+    payload = {"local_type": MessageType.Text, "nickname": "Alice", "message_content": "hello"}
+    service.start()
+    try:
+        blocked = dispatcher.dispatch_wait("unused", payload, timeout=2)
+        assert blocked["status"] == "failed"
+        assert blocked["completed"] is True
+        assert blocked["error_code"] == "wechat_ui_not_ready"
+        assert blocked["blocking_reason"] == "layout_unavailable"
+        assert blocked["send_attempted"] is False
+        handler.execute.assert_not_called()
+        controller._can_send_message.assert_not_called()
+
+        controller.window_manager.ensure_action_ready.return_value = True
+        successful = dispatcher.dispatch_wait("unused", payload, timeout=2)
+        assert successful["status"] == "executed"
+        assert successful["action_id"] != blocked["action_id"]
+        assert service.get_result(blocked["action_id"])["send_attempted"] is False
+        handler.execute.assert_called_once()
+    finally:
+        service.stop()
+
+
+def test_login_lost_after_initial_preflight_still_blocks_send(db, monkeypatch):
+    handler = SimpleNamespace(execute=Mock())
+    controller = controller_for(db, handler, monkeypatch)
+    controller.window_manager.ensure_action_ready = Mock(side_effect=[True, False])
+    controller.window_manager.get_readiness = lambda: {"reason": "scan_required"}
+    action = SendTextMessageAction(content="hello", target="Alice")
+    assert controller.execute_action(action) is False
+    assert action.execution_result["blocking_reason"] == "scan_required"
+    assert action.execution_result["send_attempted"] is False
+    handler.execute.assert_not_called()
+
+
 def test_timeout_can_query_original_task_without_requeue(db):
     queue = Queue()
     controller = SimpleNamespace(execute_action=Mock(return_value=True))

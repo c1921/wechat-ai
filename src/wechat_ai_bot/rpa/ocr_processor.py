@@ -46,21 +46,24 @@ class OCRProcessor:
             self.local_ocr = RapidOCR()
 
     def process_image(
-        self, image_path: str = None, image: Image.Image = None
+        self, image_path: str = None, image: Image.Image = None, *, local_only: bool = False
     ) -> List[Dict]:
         """
         处理图片，返回 OCR 结果。
         Args:
             image_path (str): 图片路径。
             image (Image.Image): 图片对象。
+            local_only (bool): 在本机识别窗口和登录截图。
         Returns:
             List[Dict]: OCR 结果列表。
         """
         start_time = time.time()
         try:
-            if self.use_remote:
+            if self.use_remote and not local_only:
                 result = self._process_remote(image_path, image)
             else:
+                if local_only and self.local_ocr is None:
+                    self.local_ocr = RapidOCR()
                 result = self._process_local(image_path, image)
             result = self._merge_text_blocks(result)
             result = [r for r in result if r["confidence"] >= self.min_confidence]

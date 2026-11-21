@@ -148,6 +148,24 @@ class RPAController:
         with getattr(self.window_manager, "ui_lock", nullcontext()):
             return self._execute_action_locked(action)
 
+    def _check_action_ready(self, action: RPAAction) -> bool:
+        ensure_ready = getattr(self.window_manager, "ensure_action_ready", None)
+        if not callable(ensure_ready) or ensure_ready(action):
+            return True
+        get_readiness = getattr(self.window_manager, "get_readiness", None)
+        readiness = get_readiness() if callable(get_readiness) else {}
+        reason = readiness.get("reason") or "unknown"
+        explanation = readiness.get("guidance") or reason
+        action.execution_result.update(
+            error_code="wechat_ui_not_ready",
+            blocking_reason=reason,
+            error=f"微信界面未就绪，未执行操作：{explanation}",
+            send_attempted=False,
+            retryable=False,
+            guidance="微信界面恢复后可重新提交此操作。",
+        )
+        return False
+
     def _execute_action_locked(self, action: RPAAction) -> bool:
         requires_verification = action.action_type in SEND_ACTIONS
         action.execution_result = {}
@@ -160,30 +178,30 @@ class RPAController:
             self.logger.error(f"No handler registered for: {action.action_type}")
             return False
 
-        if action.is_send_message:
-            max_wait_seconds = 10
-            wait_interval = 1
-            start_time = time.monotonic()
-            while not self._can_send_message():
-                if time.monotonic() - start_time > max_wait_seconds:
-                    self.logger.warning(f"Rate limit timeout for {action.action_type.name}")
-                    return False
-                self.logger.info(f"Rate limited, waiting {wait_interval}s...")
-                time.sleep(wait_interval)
-            self.logger.info("Rate limit passed.")
-            time.sleep(random.uniform(0.5, 1.5))
-
         try:
-            ensure_ready = getattr(self.window_manager, "ensure_action_ready", None)
-            if callable(ensure_ready) and not ensure_ready(action):
-                self.logger.error("RPA preflight failed for %s", action.action_type.name)
+            if not self._check_action_ready(action):
                 return False
 
-            self.logger.info(f"Executing RPA action: {action.action_type.name}")
+            if action.is_send_message:
+                deadline = time.monotonic() + 10
+                while not self._can_send_message():
+                    if time.monotonic() > deadline:
+                        self.logger.warning("Rate limit timeout for %s", action.action_type.name)
+                        return False
+                    self.logger.info("Rate limited, waiting 1s...")
+                    time.sleep(1)
+                time.sleep(random.uniform(0.5, 1.5))
+
             verifier = None
             if requires_verification:
                 verifier = SendVerifier(self.db)
                 verifier.prepare(action)
+            # The limiter and database work can outlast the window observation.
+            if (action.is_send_message or requires_verification) and not self._check_action_ready(action):
+                return False
+
+            self.logger.info(f"Executing RPA action: {action.action_type.name}")
+            if requires_verification:
                 action.execution_result["send_attempted"] = True
             success = handler.execute(action)
             if success and verifier is not None:
