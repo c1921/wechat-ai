@@ -17,6 +17,7 @@ WeChat-AI 主要解决一个问题：把登录好的 Linux 微信放进一个可
 - **执行受控 RPA 操作**：支持发送文本/文件、拍一拍、群公告、退群、邀请/移除群成员、修改群名和群内昵称。写操作建议先 dry run，再由人确认。
 - **管理和调试运行时**：内置管理台可以查看数据库、队列、RPA、窗口尺寸、YOLO、插件和日志状态，也可以一键重扫数据库、重置微信窗口尺寸。
 - **保留插件体系**：沿用上游 `wechat_ai.plugins` entry point 模型，方便后续迁移和扩展业务插件。
+- **私聊自动回复**：标准 Docker 镜像默认安装。配置后可通过 SSH 回复白名单联系人的私聊文本，并为每位联系人保留独立会话。参见[私聊自动回复插件](plugins/private-chat-auto-reply/README.md)。
 
 ## 快速开始
 
@@ -307,6 +308,8 @@ docker exec wechat-ai /scripts/health-check.sh
 docker compose logs -f wechat-ai
 tail -f config/logs/bot.log
 ```
+
+`health-check.sh` 检查容器基础设施。面板和 MCP 的 `get_runtime_status` 会分别显示微信进程、登录状态、数据库可读性和界面可发送性。发送返回 `wechat_ui_not_ready` 且 `send_attempted=false` 时，原任务已结束，可在界面恢复后重新提交。若等待结果超时，先用 `action_id` 查询 `get_rpa_result`。
 
 使用当前 `./config` 重建并重启：
 

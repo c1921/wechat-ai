@@ -8,6 +8,9 @@ The main documentation is Chinese-first because this project targets WeChat
 users and Chinese deployment contexts. See [README.md](README.md) for the full
 guide.
 
+The Docker image comes with the [private-chat auto-reply plugin](plugins/private-chat-auto-reply/README.md).
+Configure and enable it to reply to text messages from allowlisted contacts, with a separate conversation for each.
+
 ## Quick Start
 
 ```bash
