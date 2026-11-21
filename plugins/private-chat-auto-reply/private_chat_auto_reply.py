@@ -23,7 +23,6 @@ from wechat_ai_bot.weixin.message_classes import TextMessage
 REQUEST_LIMIT = 131072
 REPLY_TIMEOUT = 95
 SEND_TIMEOUT = 45
-MAX_REPLIES = 5
 
 
 class PrivateChatAutoReplyConfig(BaseModel):
@@ -55,7 +54,7 @@ class GenerationError(Exception):
 def extract_replies(response: dict) -> list[str]:
     if "replies" in response:
         raw = response["replies"]
-        if not isinstance(raw, list) or not raw or len(raw) > MAX_REPLIES:
+        if not isinstance(raw, list) or not raw:
             return []
         if any(not isinstance(item, str) or not item.strip() for item in raw):
             return []

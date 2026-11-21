@@ -14,7 +14,6 @@ from wechat_invite_admission import CREDENTIAL_NAME, PROBE_OPERATION, read_key, 
 
 
 REQUEST_LIMIT = 131072
-MAX_REPLIES = 5
 
 
 class WeChatGenerator(ErosGenerator):
@@ -80,7 +79,7 @@ def handle(request: dict, config: dict, generator: WeChatGenerator, admission_ke
         raw_replies = [
             asyncio.run(generator.generate(text, conversation=conversation, message_id=message_id))
         ]
-    if not isinstance(raw_replies, list) or not raw_replies or len(raw_replies) > MAX_REPLIES:
+    if not isinstance(raw_replies, list) or not raw_replies:
         raise ProviderError("invalid_reply")
     if any(not isinstance(item, str) or not item.strip() for item in raw_replies):
         raise ProviderError("invalid_reply")

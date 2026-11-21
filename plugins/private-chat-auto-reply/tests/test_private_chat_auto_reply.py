@@ -150,8 +150,18 @@ class PrivateChatAutoReplyTest(unittest.IsolatedAsyncioTestCase):
         with closing(sqlite3.connect(self.plugin.state_file)) as connection:
             self.assertEqual(connection.execute("SELECT status FROM turns").fetchone(), ("send_failed",))
 
+    async def test_multi_bubble_delivery_has_no_segment_cap(self):
+        bubbles = [f"第{i}条" for i in range(12)]
+        with patch(
+            "private_chat_auto_reply.request_reply",
+            new_callable=AsyncMock,
+            return_value={"ok": True, "reply": "\n\n".join(bubbles), "replies": bubbles},
+        ):
+            await self.plugin.handle_message(self.context(34))
+        self.assertEqual([action.content for action in self.actions], bubbles)
+
     async def test_malformed_multi_bubble_replies_are_discarded(self):
-        for invalid in ([], ["ok", "  "], ["a"] * 6, "not-a-list"):
+        for invalid in ([], ["ok", "  "], [1], "not-a-list"):
             self.actions.clear()
             with self.subTest(invalid=invalid), patch(
                 "private_chat_auto_reply.request_reply",

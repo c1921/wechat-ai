@@ -113,8 +113,13 @@ class ErosBridgeTest(unittest.TestCase):
         })
         self.generator.generate_replies.assert_awaited_once()
 
+    def test_multi_bubble_replies_have_no_segment_cap(self):
+        bubbles = [f"第{i}条" for i in range(12)]
+        self.generator.generate_replies = AsyncMock(return_value=bubbles)
+        self.assertEqual(self.request(self.first)["replies"], bubbles)
+
     def test_invalid_multi_bubble_replies_fail_closed(self):
-        for invalid in ([], ["ok", ""], ["a"] * 6, "not-a-list"):
+        for invalid in ([], ["ok", ""], ["a", 1], "not-a-list"):
             with self.subTest(invalid=invalid):
                 self.generator.generate_replies = AsyncMock(return_value=invalid)
                 with self.assertRaisesRegex(RuntimeError, "invalid_reply"):
