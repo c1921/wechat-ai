@@ -117,6 +117,50 @@ class PrivateChatAutoReplyTest(unittest.IsolatedAsyncioTestCase):
         with closing(sqlite3.connect(self.plugin.state_file)) as connection:
             self.assertEqual(connection.execute("SELECT status FROM turns").fetchone(), ("send_unconfirmed",))
 
+    async def test_multi_bubble_delivery_sends_each_segment_in_order(self):
+        with patch(
+            "private_chat_auto_reply.request_reply",
+            new_callable=AsyncMock,
+            return_value={"ok": True, "reply": "第一条\n\n第二条\n\n第三条", "replies": ["第一条", "第二条", "第三条"]},
+        ):
+            await self.plugin.handle_message(self.context(35))
+        self.assertEqual([action.content for action in self.actions], ["第一条", "第二条", "第三条"])
+        with closing(sqlite3.connect(self.plugin.state_file)) as connection:
+            self.assertEqual(connection.execute("SELECT status FROM turns").fetchone(), ("executed",))
+
+    async def test_multi_bubble_failure_stops_remaining_bubbles_without_retry(self):
+        def send(actions):
+            action = actions[0]
+            self.actions.append(action)
+            if len(self.actions) == 2:
+                action.result_queue.put({"ok": False, "verified": False})
+            else:
+                action.result_queue.put({"ok": True, "verified": True})
+
+        self.bot.processor_service.add_rpa_actions = send
+        with patch(
+            "private_chat_auto_reply.request_reply",
+            new_callable=AsyncMock,
+            return_value={"ok": True, "replies": ["第一条", "第二条", "第三条"]},
+        ) as generate:
+            await self.plugin.handle_message(self.context(36))
+            await self.plugin.handle_message(self.context(36))
+            self.assertEqual(generate.await_count, 1)
+        self.assertEqual([action.content for action in self.actions], ["第一条", "第二条"])
+        with closing(sqlite3.connect(self.plugin.state_file)) as connection:
+            self.assertEqual(connection.execute("SELECT status FROM turns").fetchone(), ("send_failed",))
+
+    async def test_malformed_multi_bubble_replies_are_discarded(self):
+        for invalid in ([], ["ok", "  "], ["a"] * 6, "not-a-list"):
+            self.actions.clear()
+            with self.subTest(invalid=invalid), patch(
+                "private_chat_auto_reply.request_reply",
+                new_callable=AsyncMock,
+                return_value={"ok": True, "reply": "fallback", "replies": invalid},
+            ):
+                await self.plugin.handle_message(self.context(37 + len(str(invalid))))
+            self.assertEqual(self.actions, [])
+
     async def test_migration_keeps_the_conversation_id_and_existing_dedup(self):
         conversation = sha256(b"wechat-aimee\0test-account\0allowed-id").hexdigest()
         with closing(sqlite3.connect(self.plugin.state_file)) as connection, connection:

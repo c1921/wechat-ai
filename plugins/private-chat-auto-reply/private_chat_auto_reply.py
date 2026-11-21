@@ -23,6 +23,7 @@ from wechat_ai_bot.weixin.message_classes import TextMessage
 REQUEST_LIMIT = 131072
 REPLY_TIMEOUT = 95
 SEND_TIMEOUT = 45
+MAX_REPLIES = 5
 
 
 class PrivateChatAutoReplyConfig(BaseModel):
@@ -49,6 +50,20 @@ class PrivateChatAutoReplyConfig(BaseModel):
 
 class GenerationError(Exception):
     """Generation failed without a usable reply."""
+
+
+def extract_replies(response: dict) -> list[str]:
+    if "replies" in response:
+        raw = response["replies"]
+        if not isinstance(raw, list) or not raw or len(raw) > MAX_REPLIES:
+            return []
+        if any(not isinstance(item, str) or not item.strip() for item in raw):
+            return []
+        return [item.strip() for item in raw]
+    reply = response.get("reply")
+    if isinstance(reply, str) and reply.strip():
+        return [reply.strip()]
+    return []
 
 
 async def request_reply(config: PrivateChatAutoReplyConfig, payload: dict, *, timeout=REPLY_TIMEOUT) -> dict:
@@ -271,25 +286,35 @@ class PrivateChatAutoReplyPlugin(Plugin):
                 self.logger.warning("Private chat auto-reply generation stopped (%s)", type(error).__name__)
                 return
 
-            reply = response.get("reply")
+            replies = extract_replies(response)
             target = self._target(contact_username)
-            if (not isinstance(reply, str) or not reply.strip() or not target
+            if (not replies or not target
                     or self._membership(account, contact_username) != membership):
                 self._record(conversation, message_id, "reply_discarded")
                 return
 
-            results = Queue(maxsize=1)
-            action = SendTextMessageAction(
-                target_username=contact_username, target=target,
-                content=reply.strip(), is_chatroom=False, result_queue=results,
-            )
-            self._record(conversation, message_id, "queued", action.action_id)
-            self.bot.rpa_service.track_action(action)
-            self.add_rpa_action(action)
-            try:
-                result = await asyncio.to_thread(results.get, True, SEND_TIMEOUT)
-            except Empty:
-                self._record(conversation, message_id, "send_unconfirmed", action.action_id)
-                return
-            status = "executed" if result.get("ok") and result.get("verified") else "send_failed"
-            self._record(conversation, message_id, status, action.action_id)
+            last_action_id = None
+            for index, bubble in enumerate(replies):
+                if index > 0:
+                    target = self._target(contact_username)
+                    if not target or self._membership(account, contact_username) != membership:
+                        self._record(conversation, message_id, "send_failed", last_action_id)
+                        return
+                results = Queue(maxsize=1)
+                action = SendTextMessageAction(
+                    target_username=contact_username, target=target,
+                    content=bubble, is_chatroom=False, result_queue=results,
+                )
+                self._record(conversation, message_id, "queued", action.action_id)
+                self.bot.rpa_service.track_action(action)
+                self.add_rpa_action(action)
+                try:
+                    result = await asyncio.to_thread(results.get, True, SEND_TIMEOUT)
+                except Empty:
+                    self._record(conversation, message_id, "send_unconfirmed", action.action_id)
+                    return
+                if not (result.get("ok") and result.get("verified")):
+                    self._record(conversation, message_id, "send_failed", action.action_id)
+                    return
+                last_action_id = action.action_id
+            self._record(conversation, message_id, "executed", last_action_id)

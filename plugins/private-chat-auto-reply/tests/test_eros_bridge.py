@@ -54,7 +54,10 @@ class ErosBridgeTest(unittest.TestCase):
         )
 
     def test_legacy_allowlist_and_identity_still_work(self):
-        self.assertTrue(self.request(self.first)["ok"])
+        response = self.request(self.first)
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["reply"], "reply")
+        self.assertEqual(response["replies"], ["reply"])
         self.assertEqual(self.generator.identity(self.first), uuid.uuid5(self.namespace, "wechat-aimee:" + self.first))
         with self.assertRaisesRegex(ValueError, "invalid_turn"):
             self.request(self.second)
@@ -99,3 +102,20 @@ class ErosBridgeTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "invalid_turn"):
                 self.bridge.handle(request, self.config, self.generator, key)
         self.generator.generate.assert_awaited_once()
+
+    def test_multi_bubble_replies_return_segments_and_joined_fallback(self):
+        self.generator.generate_replies = AsyncMock(return_value=["第一条", "第二条", "第三条"])
+        response = self.request(self.first)
+        self.assertEqual(response, {
+            "ok": True,
+            "reply": "第一条\n\n第二条\n\n第三条",
+            "replies": ["第一条", "第二条", "第三条"],
+        })
+        self.generator.generate_replies.assert_awaited_once()
+
+    def test_invalid_multi_bubble_replies_fail_closed(self):
+        for invalid in ([], ["ok", ""], ["a"] * 6, "not-a-list"):
+            with self.subTest(invalid=invalid):
+                self.generator.generate_replies = AsyncMock(return_value=invalid)
+                with self.assertRaisesRegex(RuntimeError, "invalid_reply"):
+                    self.request(self.first)
