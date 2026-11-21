@@ -28,7 +28,6 @@ from wechat_ai_bot.services.core.processor_service import ProcessorService
 from wechat_ai_bot.services.core.rpa_service import RPAService
 from wechat_ai_bot.services.core.voice_transcription_service import VoiceTranscriptionService
 from wechat_ai_bot.services.core.visual_message_service import VisualMessageService
-from wechat_ai_bot.services.functional.weixin_status_service import WeixinStatusService
 from wechat_ai_bot.utils.helpers import ensure_dir_exists
 from wechat_ai_bot.utils.logging_setup import setup_logging
 
@@ -47,9 +46,9 @@ class Bot:
         self.logger = logging.getLogger(self.__class__.__name__)
 
         self.is_running = False
-        self.chat_window_ready = False
         self.started_at = time.time()
-        self._window_init_thread = None
+        self._window_monitor_thread = None
+        self._window_monitor_stop = threading.Event()
         self._database_recovery_thread = None
         self._components: List[Any] = []
 
@@ -158,15 +157,6 @@ class Bot:
             yolo_stride=visual_config.get("yolo_stride", 32),
         )
 
-        # WeChat status monitor
-        weixin_config = self.config.config.get("dingtalk", {})
-        self.weixin_status_service = WeixinStatusService(
-            config=self.config,
-            window_manager=self.window_manager,
-            image_processor=self.image_processor,
-            ocr_processor=self.ocr_processor,
-        )
-
         # MQTT (optional)
         mqtt_config = self.config.get("mqtt", {})
         self.mqtt_service = None
@@ -227,7 +217,7 @@ class Bot:
         self._select_message_input_services()
 
         self.is_running = True
-        self._start_window_init_loop()
+        self._start_window_monitor()
         self._start_database_recovery_loop()
 
         for component in self._components:
@@ -324,25 +314,23 @@ class Bot:
                 self.logger.info("Visual fallback stopped after database recovery")
             return
 
-    def _start_window_init_loop(self):
-        self._window_init_thread = threading.Thread(
-            target=self._window_init_loop,
-            daemon=True,
-            name="WindowInitLoop",
-        )
-        self._window_init_thread.start()
+    @property
+    def chat_window_ready(self) -> bool:
+        return self.window_manager.get_readiness()["ui_send_ready"]
 
-    def _window_init_loop(self):
-        self.logger.info("Waiting for WeChat chat window...")
-        retry = 0
-        while self.is_running and not self.chat_window_ready:
-            retry += 1
-            if self.window_manager.init_chat_window():
-                self.chat_window_ready = True
-                self.logger.info("Chat window initialized successfully")
-                return
-            self.logger.warning(f"Chat window init failed, retry {retry}")
-            time.sleep(3)
+    def _start_window_monitor(self):
+        self._window_monitor_stop.clear()
+        self._window_monitor_thread = threading.Thread(
+            target=self._window_monitor_loop,
+            daemon=True,
+            name="WindowMonitor",
+        )
+        self._window_monitor_thread.start()
+
+    def _window_monitor_loop(self):
+        while not self._window_monitor_stop.is_set():
+            self.window_manager.monitor_window()
+            self._window_monitor_stop.wait(3)
 
     def start(self):
         """Start the bot. Blocks on MCP server until signal."""
@@ -368,8 +356,9 @@ class Bot:
         """Graceful shutdown of all components."""
         self.logger.info("--- Bot Teardown ---")
         self.is_running = False
-        if self._window_init_thread and self._window_init_thread.is_alive():
-            self._window_init_thread.join(timeout=5)
+        self._window_monitor_stop.set()
+        if self._window_monitor_thread and self._window_monitor_thread.is_alive():
+            self._window_monitor_thread.join(timeout=5)
         if self._database_recovery_thread and self._database_recovery_thread.is_alive():
             self._database_recovery_thread.join(timeout=5)
 
