@@ -105,6 +105,7 @@ class LinuxDatabaseService:
         self._last_auto_refresh_at = 0.0
 
         self.is_available = False
+        self.is_readable: bool | None = None
         self.last_error = ""
         self.last_scan_at = 0.0
         self._last_message_map_refresh = 0.0
@@ -127,6 +128,7 @@ class LinuxDatabaseService:
     def refresh(self, *, preserve_sequences: bool = False) -> dict[str, Any]:
         """Refresh discovery, keyring, caches, and polling baselines."""
         with self._lock:
+            self.is_readable = None
             previous_sequences = dict(self._table_sequences) if preserve_sequences else {}
             for conn in self._connections.values():
                 try:
@@ -156,12 +158,14 @@ class LinuxDatabaseService:
                     previous_sequences.setdefault(table, sequence)
             self._prime_message_sequences(previous_sequences)
             self.is_available = bool(self._message_tables())
+            self.is_readable = self._probe_message_reads()
             if not self.is_available and not self.last_error:
                 self.last_error = "no open message tables"
             return self.get_status()
 
     def stop(self) -> None:
         with self._lock:
+            self.is_readable = False
             for conn in self._connections.values():
                 try:
                     conn.close()
@@ -243,6 +247,7 @@ class LinuxDatabaseService:
     def check_new_messages(self) -> list[tuple[str, tuple]]:
         with self._lock:
             if not self.is_available:
+                self.is_readable = False
                 return []
             self._refresh_message_maps_if_needed()
             messages: list[tuple[str, tuple]] = []
@@ -259,6 +264,7 @@ class LinuxDatabaseService:
                     continue
                 messages.extend((table_name, row) for row in rows)
             messages.sort(key=lambda item: (item[1][3] or 0, item[1][5] or 0))
+            self.is_readable = table_count > failure_count
             if failure_count:
                 self._consecutive_poll_errors += 1
                 self.logger.warning(
@@ -729,6 +735,7 @@ class LinuxDatabaseService:
         return {
             "enabled": True,
             "available": self.is_available,
+            "readable": self.is_readable,
             "driver": self.driver_name,
             "root": str(self.root),
             "account_count": len(self._accounts),
@@ -979,6 +986,20 @@ class LinuxDatabaseService:
         if rows:
             self._table_sequences[(db_path, table_name)] = max(int(row[0]) for row in rows)
         return rows
+
+    def _probe_message_reads(self) -> bool:
+        """Check a representative message table per database without advancing offsets."""
+        checked_paths = set()
+        for path, table, _ in self._message_tables():
+            if path in checked_paths:
+                continue
+            checked_paths.add(path)
+            try:
+                self.execute_query(path, f"select local_id from {self._q(table)} limit 1")
+                return True
+            except Exception:
+                self.logger.debug("Message database read probe failed", exc_info=True)
+        return False
 
     def _message_tables(self) -> list[tuple[Path, str, str]]:
         tables: list[tuple[Path, str, str]] = []

@@ -148,8 +148,13 @@ class LinuxDatabaseRecoveryTest(unittest.TestCase):
 
         for _ in range(3):
             self.assertEqual(service.check_new_messages(), [])
+            self.assertFalse(service.get_status()["readable"])
 
         self.assertEqual(len(refreshes), 1)
+        self.assertTrue(service.get_status()["available"])
+        service._fetch_new_rows = lambda *_args: []
+        self.assertEqual(service.check_new_messages(), [])
+        self.assertTrue(service.get_status()["readable"])
 
     def test_refresh_preserving_sequences_does_not_swallow_internal_type_error(self):
         service = LinuxDatabaseService(UserInfo(account="me"))
