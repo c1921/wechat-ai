@@ -24,7 +24,7 @@ from typing import Any, Callable, Optional
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ImageContent, TextContent
 from wechat_ai_bot.clients.mqtt_client import MQTTClient
-from wechat_ai_bot.mcp.debug import add_media_base64, build_debug_status, register_debug_routes
+from wechat_ai_bot.mcp.debug import add_media_base64, build_debug_status, build_window_status, register_debug_routes
 from wechat_ai_bot.mcp.dispatchers import (
     MqttCommandDispatcher,
     QueueCommandDispatcher,
@@ -677,42 +677,6 @@ def create_app(user_info: UserInfo, config: dict, bot: Any = None) -> FastMCP:
                     pass
         return payload
 
-    def _window_status_payload(window_manager: Any) -> dict[str, Any]:
-        if not window_manager:
-            return {"status": "unavailable", "message": "window manager unavailable"}
-        refresh = getattr(window_manager, "refresh_window_geometry", None)
-        if callable(refresh):
-            try:
-                refresh()
-            except Exception:
-                logger.debug("refresh_window_geometry failed", exc_info=True)
-        return {
-            "state": getattr(window_manager, "last_window_state", ""),
-            "current_window": bool(getattr(window_manager, "current_window", None)),
-            "target_size": list(getattr(window_manager, "target_window_size", ()) or ()),
-            "actual_geometry": getattr(window_manager, "actual_window_geometry", {}) or {},
-            "aligned": bool(getattr(window_manager, "window_aligned", False)),
-            "window_id": getattr(window_manager, "window_id", None),
-            "message_region": (
-                [
-                    getattr(window_manager, "MSG_TOP_X", 0),
-                    getattr(window_manager, "MSG_TOP_Y", 0),
-                    getattr(window_manager, "MSG_WIDTH", 0),
-                    getattr(window_manager, "MSG_HEIGHT", 0),
-                ]
-                if getattr(window_manager, "MSG_WIDTH", 0) and getattr(window_manager, "MSG_HEIGHT", 0)
-                else None
-            ),
-            "sidebar_width": getattr(window_manager, "SIDE_BAR_WIDTH", 0),
-            "session_list_width": getattr(window_manager, "SESSION_LIST_WIDTH", 0),
-            "title_bar_height": getattr(window_manager, "TITLE_BAR_HEIGHT", 0),
-            "send_button": (
-                getattr(window_manager, "ICON_CONFIGS", {})
-                .get("send_button", {})
-                .get("position")
-            ),
-        }
-
     def _chat_line(message: dict[str, Any]) -> str:
         sender = message.get("sender_display") or message.get("sender_username") or "unknown"
         when = message.get("time") or str(message.get("create_time") or "")
@@ -779,8 +743,12 @@ def create_app(user_info: UserInfo, config: dict, bot: Any = None) -> FastMCP:
         Get current WeChat X11 window geometry, alignment, layout, and send button state.
         """
         window_manager = _window_manager()
-        payload = _window_status_payload(window_manager)
-        payload["status"] = "ok" if window_manager else "unavailable"
+        if not window_manager:
+            return _json({"status": "unavailable", "message": "window manager unavailable"})
+        payload = build_window_status(window_manager)
+        db = _database_service()
+        payload["readiness"]["database_readable"] = getattr(db, "is_readable", None) if db else False
+        payload["status"] = "ok"
         return _json(payload)
 
     @mcp.tool()
@@ -794,16 +762,14 @@ def create_app(user_info: UserInfo, config: dict, bot: Any = None) -> FastMCP:
         window_manager = _window_manager()
         if not window_manager:
             return _json({"status": "unavailable", "message": "window manager unavailable"})
-        ensure_ready = getattr(window_manager, "ensure_action_ready", None)
-        if not callable(ensure_ready):
+        init_window = getattr(window_manager, "init_chat_window", None)
+        if not callable(init_window):
             return _json({"status": "unavailable", "message": "window reset is unavailable"})
-        ok = bool(ensure_ready())
-        if ok and bot is not None and hasattr(bot, "chat_window_ready"):
-            bot.chat_window_ready = True
+        ok = bool(init_window())
         return _json(
             {
                 "status": "ok" if ok else "failed",
-                "window": _window_status_payload(window_manager),
+                "window": build_window_status(window_manager),
             }
         )
 

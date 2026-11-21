@@ -5,7 +5,8 @@ import os
 from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 from wechat_ai_bot.mcp.debug import _dashboard_html, add_media_base64, build_layout_png, mask_value, redact_text, tail_file
 from wechat_ai_bot.mcp.app import create_app
@@ -82,12 +83,20 @@ class DummyWindowManager:
     last_window_state = "ready"
 
     def refresh_window_geometry(self):
-        return self.actual_window_geometry
+        raise AssertionError("Status reads must not refresh the X11 window")
 
-    def ensure_action_ready(self):
+    def init_chat_window(self):
         self.last_window_state = "ready"
         self.window_aligned = True
         return True
+
+    def get_readiness(self):
+        return {
+            "wechat_process_running": True,
+            "login_state": "logged_in",
+            "ui_send_ready": self.last_window_state == "ready",
+            "reason": self.last_window_state,
+        }
 
 
 class DummyBot:
@@ -146,6 +155,7 @@ class DummyCompressedContact(DummyContact):
 
 class DummyDatabaseService:
     is_available = True
+    is_readable = True
     last_error = ""
 
     def __init__(self, root=None):
@@ -290,7 +300,7 @@ class DummyDatabaseService:
         return []
 
     def get_status(self):
-        return {"available": self.is_available, "contacts": 1, "message_tables": 1}
+        return {"available": self.is_available, "readable": self.is_readable, "contacts": 1, "message_tables": 1}
 
     def refresh(self):
         self.refreshed = True
@@ -507,6 +517,36 @@ class DebugRoutesTest(unittest.TestCase):
         self.assertEqual(ok.status_code, 200)
         self.assertTrue(ok.json()["message"]["running"])
 
+    def test_invitation_routes_require_dashboard_auth_and_return_code_only_on_issue(self):
+        from starlette.testclient import TestClient
+
+        bot = DummyMcpBot()
+        plugin = SimpleNamespace(
+            get_plugin_name=lambda: "private-chat-auto-reply",
+            invitation_state=lambda: {"available": True, "invitations": [], "contacts": []},
+            issue_invitation=AsyncMock(return_value={"id": "invite", "code": "WXJOIN-test", "expires_at": 1000}),
+            revoke_invitation=Mock(return_value=True),
+            remove_invited_contact=Mock(return_value=True),
+        )
+        bot.plugin_manager = SimpleNamespace(plugins=[plugin])
+        with dashboard_auth_env():
+            app = create_app(UserInfo(account="me"), DummyConfig({}), bot=bot)
+            client = TestClient(app.streamable_http_app())
+            base = "/dashboard/api/private-chat-auto-reply"
+            self.assertEqual(client.get(f"{base}/state").status_code, 401)
+            self.assertEqual(client.post(f"{base}/invitations", headers=dashboard_auth_headers()).status_code, 403)
+            plugin.issue_invitation.assert_not_awaited()
+            headers = dashboard_mutation_headers()
+            issued = client.post(f"{base}/invitations", headers=headers)
+            self.assertEqual(issued.status_code, 201)
+            self.assertEqual(issued.headers["Cache-Control"], "no-store")
+            self.assertEqual(issued.json()["code"], "WXJOIN-test")
+            self.assertNotIn("WXJOIN-test", client.get(f"{base}/state", headers=headers).text)
+            self.assertEqual(client.post(f"{base}/invitations/invite/revoke", headers=headers).status_code, 200)
+            self.assertEqual(client.post(f"{base}/contacts/member/remove", headers=headers).status_code, 200)
+        plugin.revoke_invitation.assert_called_once_with("invite")
+        plugin.remove_invited_contact.assert_called_once_with("member")
+
     def test_mcp_http_requires_non_default_bearer_token(self):
         from starlette.testclient import TestClient
 
@@ -574,9 +614,33 @@ class DebugRoutesTest(unittest.TestCase):
         self.assertEqual(window["status"], "ok")
         self.assertEqual(window["state"], "ready")
         self.assertEqual(reset["status"], "ok")
-        self.assertTrue(bot.chat_window_ready)
+        self.assertTrue(reset["window"]["readiness"]["ui_send_ready"])
         self.assertEqual(pause["status"], "ok")
         self.assertTrue(pause["paused"])
+
+    def test_mcp_readiness_distinguishes_scan_required_and_database_reads(self):
+        bot = DummyMcpBot()
+        bot.database_service.is_readable = False
+        app = create_app(UserInfo(account="me"), DummyConfig({}), bot=bot)
+        tool = app._tool_manager._tools["get_wechat_window_status"]
+        ready_window = json.loads(tool.fn(None))["readiness"]
+        self.assertTrue(ready_window["ui_send_ready"])
+        self.assertFalse(ready_window["database_readable"])
+
+        bot.window_manager.get_readiness = lambda: {
+            "wechat_process_running": True,
+            "login_state": "scan_required",
+            "ui_send_ready": False,
+            "reason": "scan_required",
+            "guidance": "请打开容器桌面，用手机微信扫码登录",
+        }
+        status = json.loads(tool.fn(None))
+        self.assertEqual(status["state"], "scan_required")
+        self.assertEqual(status["readiness"]["login_state"], "scan_required")
+        self.assertIn("扫码", status["readiness"]["guidance"])
+        self.assertTrue(status["readiness"]["wechat_process_running"])
+        self.assertFalse(status["readiness"]["database_readable"])
+        self.assertFalse(status["readiness"]["ui_send_ready"])
 
     def test_mcp_admin_and_write_tools_are_blocked_by_default(self):
         app = create_app(
@@ -683,6 +747,8 @@ class DebugRoutesTest(unittest.TestCase):
         self.assertEqual(rooms.json()["contacts"][0]["username"], "room@chatroom")
         self.assertEqual(status.status_code, 200)
         self.assertTrue(status.json()["debug"]["show_sensitive"])
+        self.assertTrue(status.json()["readiness"]["database_readable"])
+        self.assertTrue(status.json()["bot"]["chat_window_ready"])
         self.assertEqual(detail.status_code, 200)
         self.assertEqual(detail.json()["member_count"], 1)
         self.assertEqual(recent.status_code, 200)

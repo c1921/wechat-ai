@@ -101,6 +101,13 @@ class QueueCommandDispatcher:
                 "result": result,
             }
         )
+        if result.get("error_code") == "wechat_ui_not_ready":
+            response.update(
+                error_code=result["error_code"],
+                blocking_reason=result["blocking_reason"],
+                send_attempted=result["send_attempted"],
+                guidance=result["guidance"],
+            )
         return response
 
     def dispatch_rpa(self, action_type: str, action_data: Dict[str, Any]) -> str:

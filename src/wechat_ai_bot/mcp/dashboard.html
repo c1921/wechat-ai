@@ -687,6 +687,7 @@
     <nav>
       <button class="nav-btn active" data-tab="overview">总览</button>
       <button class="nav-btn" data-tab="wechat">微信</button>
+      <button class="nav-btn" data-tab="privateReply">私聊自动回复</button>
       <button class="nav-btn" data-tab="database">数据库</button>
       <button class="nav-btn" data-tab="messages">消息</button>
       <button class="nav-btn" data-tab="rpa">RPA</button>
@@ -891,6 +892,21 @@
         </div>
       </div>
 
+      <div id="privateReply" class="tab">
+        <div class="grid">
+          <section class="span-12"><h2>一次性邀请码</h2><div class="body">
+            <div class="actions">
+              <button id="issueInvite" class="primary" disabled>生成邀请码</button>
+              <input id="issuedInvite" aria-label="本次邀请码" autocomplete="off" readonly hidden>
+              <button id="copyInvite" hidden>复制</button>
+            </div>
+            <div id="inviteStatus" class="statusline" role="status"></div>
+            <div id="inviteList" class="list"></div>
+          </div></section>
+          <section class="span-12"><h2>通过邀请码加入的联系人</h2><div id="inviteContacts" class="body list"></div></section>
+        </div>
+      </div>
+
       <div id="logs" class="tab">
         <div class="grid">
           <section class="span-12"><h2>Bot 日志</h2><div class="body">
@@ -930,6 +946,9 @@
     let currentChat = null;
     let currentChats = [];
     let wechatMode = 'recent';
+    const invitePath = '/api/private-chat-auto-reply';
+    let shownInvite = null;
+    let issuingInvite = false;
 
     document.querySelectorAll('.nav-btn').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -939,6 +958,8 @@
         $(btn.dataset.tab).classList.add('active');
         if (btn.dataset.tab === 'wechat') loadWechatList().catch(err => $('wechatListStatus').textContent = err.message);
         if (btn.dataset.tab === 'logs') loadLogs().catch(showHeaderError);
+        if (btn.dataset.tab === 'privateReply') loadInvitations().catch(showInviteError);
+        else showIssuedInvite(null);
       });
     });
 
@@ -956,6 +977,93 @@
       return data;
     }
 
+    function showInviteError(error) {
+      $('inviteStatus').textContent = error.message;
+    }
+
+    function showIssuedInvite(invite) {
+      shownInvite = invite;
+      $('issuedInvite').value = invite?.code || '';
+      $('issuedInvite').hidden = !invite;
+      $('copyInvite').hidden = !invite;
+    }
+
+    const inviteDate = (seconds) => new Date(seconds * 1000).toLocaleString();
+    const confirmationLabel = (value) => ({
+      pending: '待发送', queued: '已入队', verified: '已确认投递',
+      not_sent: '未尝试发送', unconfirmed: '投递未确认', failed: '发送失败'
+    })[value] || '';
+
+    async function loadInvitations() {
+      const data = await fetchJson(apiPath(invitePath + '/state'));
+      if (!$('privateReply').classList.contains('active')) return;
+      $('issueInvite').disabled = !data.available || issuingInvite;
+      if (!data.available) $('inviteStatus').textContent = '邀请码服务未启用，或微信账号尚未读取';
+      if (shownInvite && (!data.available || shownInvite.expires_at * 1000 <= Date.now()
+          || data.invitations.some(row => row.id === shownInvite.id && row.status !== 'pending'))) {
+        showIssuedInvite(null);
+      }
+      const inviteLabels = { pending: '待使用', used: '已使用', expired: '已过期', revoked: '已撤销' };
+      $('inviteList').innerHTML = data.invitations.map(row => `
+        <div class="item"><div class="item-head"><span class="title">${esc(inviteLabels[row.status] || row.status)}</span>
+        ${row.status === 'pending' ? `<button data-revoke-invite="${esc(row.id)}">撤销</button>` : ''}</div>
+        <div class="sub">有效期至 ${esc(inviteDate(row.expires_at))}
+        ${row.redeemed_by ? ` · ${esc(row.redeemed_by)} · ${esc(confirmationLabel(row.confirmation_status))}` : ''}</div></div>
+      `).join('') || '<span class="muted">暂无邀请码</span>';
+      $('inviteContacts').innerHTML = data.contacts.map(row => `
+        <div class="item"><div class="item-head"><span class="title">${esc(row.display_name)}</span>
+        <button data-remove-invite-contact="${esc(row.id)}">移除</button></div>
+        <div class="sub">${esc(row.username)} · ${esc(confirmationLabel(row.confirmation_status))}</div></div>
+      `).join('') || '<span class="muted">暂无通过邀请码加入的联系人</span>';
+    }
+
+    $('issueInvite').addEventListener('click', async () => {
+      issuingInvite = true;
+      $('issueInvite').disabled = true;
+      showIssuedInvite(null);
+      $('inviteStatus').textContent = '正在生成邀请码…';
+      try {
+        const invite = await fetchJson(apiPath(invitePath + '/invitations'), { method: 'POST' });
+        if ($('privateReply').classList.contains('active')) showIssuedInvite(invite);
+        $('inviteStatus').textContent = `有效期至 ${inviteDate(invite.expires_at)}。请让对方单独发送邀请码。`;
+      } catch (error) {
+        showInviteError(error);
+      } finally {
+        issuingInvite = false;
+        loadInvitations().catch(showInviteError);
+      }
+    });
+
+    $('copyInvite').addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText($('issuedInvite').value);
+        $('inviteStatus').textContent = '邀请码已复制';
+      } catch (error) {
+        $('issuedInvite').select();
+        $('inviteStatus').textContent = '请选择并复制邀请码';
+      }
+    });
+
+    $('privateReply').addEventListener('click', async event => {
+      const revoke = event.target.closest('[data-revoke-invite]');
+      const remove = event.target.closest('[data-remove-invite-contact]');
+      if (!revoke && !remove) return;
+      if (remove && !window.confirm('移除这位联系人？其历史会话和记忆会保留。')) return;
+      const suffix = revoke ? `invitations/${encodeURIComponent(revoke.dataset.revokeInvite)}/revoke`
+                            : `contacts/${encodeURIComponent(remove.dataset.removeInviteContact)}/remove`;
+      try {
+        await fetchJson(apiPath(`${invitePath}/${suffix}`), { method: 'POST' });
+        $('inviteStatus').textContent = revoke ? '邀请码已撤销' : '联系人已移除';
+        await loadInvitations();
+      } catch (error) {
+        showInviteError(error);
+      }
+    });
+
+    setInterval(() => {
+      if ($('privateReply').classList.contains('active')) loadInvitations().catch(showInviteError);
+    }, 5000);
+
     function showHeaderError(err) {
       $('stamp').textContent = err.message || String(err);
     }
@@ -969,9 +1077,20 @@
         ['python', esc(data.runtime.python)],
         ['platform', esc(data.runtime.platform)]
       ]);
+      const readiness = data.readiness || {};
+      const loginLabels = {
+        logged_in: '已登录', login_required: '需重新登录', scan_required: '需扫码',
+        confirmation_required: '需手机确认', unknown: '未知'
+      };
+      const loginLabel = loginLabels[readiness.login_state] || '未知';
+      const readinessBadge = value => value == null ? warn('未知') : bool(value);
       $('bot').innerHTML = table([
-        ['运行中', bool(data.bot.running)],
-        ['聊天窗口就绪', bool(data.bot.chat_window_ready)],
+        ['Bot 运行中', bool(data.bot.running)],
+        ['微信进程在线', readinessBadge(readiness.wechat_process_running)],
+        ['微信登录', readiness.login_state === 'logged_in' ? info(loginLabel) : warn(loginLabel)],
+        ['数据库可读', readinessBadge(readiness.database_readable)],
+        ['界面可发送', bool(data.bot.chat_window_ready)],
+        ...(readiness.guidance ? [['处理方式', warn(readiness.guidance)]] : []),
         ['账号', esc(data.bot.user.account || '')],
         ['昵称', esc(data.bot.user.nickname || '')],
         ['版本', esc(data.bot.user.version || '')]
@@ -1023,9 +1142,9 @@
       const db = data.database || {};
       const media = data.media || {};
       const discovery = db.discovery || db;
-      const available = db.available || db.can_attempt_business_database_open;
+      const readable = data.readiness?.database_readable;
       const rows = [
-        ['可用', bool(available)],
+        ['可读', readable == null ? warn('未知') : bool(readable)],
         ['驱动', esc(db.driver || db.sqlcipher_driver || '')],
         ['主账号', esc(db.primary_account || '')],
         ['根目录', esc(db.root || discovery.root || '')],

@@ -70,6 +70,59 @@ def _register_dashboard_api_routes(mcp: Any, bot: Any, config: Any, prefix: str)
     from starlette.requests import Request
     from starlette.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 
+    def invitation_plugin():
+        manager = getattr(bot, "plugin_manager", None)
+        return next((
+            plugin for plugin in getattr(manager, "plugins", ())
+            if plugin.get_plugin_name() == "private-chat-auto-reply"
+            and callable(getattr(plugin, "invitation_state", None))
+        ), None)
+
+    def invite_response(payload, code=200):
+        return JSONResponse(payload, status_code=code, headers={"Cache-Control": "no-store"})
+
+    invite_api = f"{prefix}/api/private-chat-auto-reply"
+
+    @mcp.custom_route(f"{invite_api}/state", methods=["GET"], include_in_schema=False)
+    async def dashboard_invitation_state(request: Request) -> Response:
+        auth = _require_dashboard_auth(request)
+        if auth is not None:
+            return auth
+        plugin = invitation_plugin()
+        if plugin is None:
+            return invite_response({"available": False, "invitations": [], "contacts": []})
+        return invite_response(plugin.invitation_state())
+
+    @mcp.custom_route(f"{invite_api}/invitations", methods=["POST"], include_in_schema=False)
+    async def dashboard_issue_invitation(request: Request) -> Response:
+        denied = _require_dashboard_auth(request) or _require_dashboard_mutation_header(request)
+        if denied is not None:
+            return denied
+        plugin = invitation_plugin()
+        invitation = await plugin.issue_invitation() if plugin else None
+        if invitation is None:
+            return invite_response({"ok": False, "error": "邀请码服务不可用，请核对微信账号和 Eros 验签配置"}, 503)
+        return invite_response({"ok": True, **invitation}, 201)
+
+    async def change_invitation_state(request: Request, method: str) -> Response:
+        denied = _require_dashboard_auth(request) or _require_dashboard_mutation_header(request)
+        if denied is not None:
+            return denied
+        plugin = invitation_plugin()
+        if plugin is None:
+            return invite_response({"ok": False, "error": "邀请码服务不可用"}, 503)
+        if not getattr(plugin, method)(request.path_params["item_id"]):
+            return invite_response({"ok": False, "error": "该条目已失效或已处理"}, 409)
+        return invite_response({"ok": True})
+
+    @mcp.custom_route(f"{invite_api}/invitations/{{item_id}}/revoke", methods=["POST"], include_in_schema=False)
+    async def dashboard_revoke_invitation(request: Request) -> Response:
+        return await change_invitation_state(request, "revoke_invitation")
+
+    @mcp.custom_route(f"{invite_api}/contacts/{{item_id}}/remove", methods=["POST"], include_in_schema=False)
+    async def dashboard_remove_invited_contact(request: Request) -> Response:
+        return await change_invitation_state(request, "remove_invited_contact")
+
     @mcp.custom_route(f"{prefix}/api/status", methods=["GET"], include_in_schema=False)
     async def debug_status(request: Request) -> Response:
         auth_response = _require_dashboard_auth(request)
@@ -140,17 +193,15 @@ def _register_dashboard_api_routes(mcp: Any, bot: Any, config: Any, prefix: str)
         window_manager = getattr(bot, "window_manager", None)
         if not window_manager:
             return JSONResponse({"ok": False, "error": "window manager unavailable"}, status_code=503)
-        ensure_ready = getattr(window_manager, "ensure_action_ready", None)
-        if not callable(ensure_ready):
+        init_window = getattr(window_manager, "init_chat_window", None)
+        if not callable(init_window):
             return JSONResponse({"ok": False, "error": "window reset is unavailable"}, status_code=503)
-        ok = bool(ensure_ready())
-        if ok and hasattr(bot, "chat_window_ready"):
-            bot.chat_window_ready = True
+        ok = bool(init_window())
         return JSONResponse(
             {
                 "ok": ok,
                 "error": "" if ok else "window reset failed",
-                "window": _window_status(window_manager, show_sensitive=True),
+                "window": build_window_status(window_manager, show_sensitive=True),
             },
             status_code=200 if ok else 500,
         )
@@ -464,6 +515,7 @@ def _register_dashboard_api_routes(mcp: Any, bot: Any, config: Any, prefix: str)
             except Empty:
                 result = None
         if result is not None:
+            blocked = result.get("error_code") == "wechat_ui_not_ready"
             return JSONResponse(
                 {
                     "ok": bool(result.get("ok")),
@@ -477,7 +529,7 @@ def _register_dashboard_api_routes(mcp: Any, bot: Any, config: Any, prefix: str)
                     "queue_size": queue.qsize(),
                     "result": result,
                 },
-                status_code=200 if result.get("ok") else 500,
+                status_code=409 if blocked else 200 if result.get("ok") else 500,
             )
         return JSONResponse(
             {
@@ -705,6 +757,10 @@ def build_debug_status(
         database_service,
         show_sensitive=show_sensitive,
     )
+    window = build_window_status(window_manager, show_sensitive=show_sensitive)
+    readiness = {**window.get("readiness", {}), "database_readable": db_report.get("readable")}
+    if database_service is None:
+        readiness["database_readable"] = False
 
     return {
         "generated_at": int(now),
@@ -717,7 +773,7 @@ def build_debug_status(
         },
         "bot": {
             "running": bool(getattr(bot, "is_running", False)),
-            "chat_window_ready": bool(getattr(bot, "chat_window_ready", False)),
+            "chat_window_ready": readiness.get("ui_send_ready", bool(getattr(bot, "chat_window_ready", False))),
             "user": _user_status(getattr(bot, "user_info", None), show_sensitive),
         },
         "processes": _process_status(),
@@ -730,7 +786,8 @@ def build_debug_status(
             "visual": _visual_status(visual_service, show_sensitive),
             "mqtt": _mqtt_status(mqtt_service),
         },
-        "window": _window_status(window_manager, show_sensitive=show_sensitive),
+        "window": window,
+        "readiness": readiness,
         "yolo": {
             "model_loaded": bool(getattr(image_processor, "yolo", None)),
             "model_path": str(getattr(image_processor, "model_path", "")),
@@ -1729,22 +1786,21 @@ def _expand_database_status(
 
 def _process_status() -> dict[str, Any]:
     return {
-        "wechat": _pgrep_exact("wechat"),
+        "wechat": _pgrep_exact("wechat|weixin"),
         "bot": _pgrep("wechat_ai_bot.bot"),
         "display": _command(["xdotool", "getdisplaygeometry"], timeout=1.5),
     }
 
 
-def _window_status(window_manager: Any, *, show_sensitive: bool = False) -> dict[str, Any]:
+def build_window_status(window_manager: Any, *, show_sensitive: bool = False) -> dict[str, Any]:
     if not window_manager:
         return {}
-    refresh = getattr(window_manager, "refresh_window_geometry", None)
-    if callable(refresh):
-        refresh()
+    readiness = _safe_call(window_manager, "get_readiness") or {}
     current_session = str(_safe_call(window_manager, "get_current_session_name") or "")
     return {
         "current_window": bool(getattr(window_manager, "current_window", None)),
-        "state": getattr(window_manager, "last_window_state", ""),
+        "state": readiness.get("reason", getattr(window_manager, "last_window_state", "")),
+        "readiness": readiness,
         "message_region": _safe_call(window_manager, "get_message_region"),
         "target_size": getattr(window_manager, "target_window_size", None),
         "actual_geometry": getattr(window_manager, "actual_window_geometry", {}),
