@@ -1,0 +1,11 @@
+.git
+.env
+config/
+config.backup-*/
+config.clean-*/
+docker-compose.override.yml
+releases/
+secrets/
+**/__pycache__/
+**/*.egg-info/
+**/build/

@@ -4,6 +4,7 @@ config/
 !config/.*
 config.backup-*/
 config.clean-*/
+/secrets/
 
 # Python
 __pycache__/

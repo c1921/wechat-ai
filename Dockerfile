@@ -30,7 +30,7 @@ RUN apt-get update && \
         libpangocairo-1.0-0 libx11-6 libx11-xcb1 libxcomposite1 libxdamage1 \
         libxext6 libxfixes3 libxi6 libxrandr2 libxrender1 libxss1 libxtst6 \
         libatomic1 shared-mime-info desktop-file-utils stalonetray inotify-tools \
-        ffmpeg curl wget xclip xdotool wmctrl x11-utils x11-xserver-utils gnome-screenshot libgl1 \
+        ffmpeg curl wget xclip xdotool wmctrl x11-utils x11-xserver-utils gnome-screenshot libgl1 openssh-client \
         python3.12 python3.12-venv python3.12-dev python3-tk
 
 RUN sed -i 's/^# *zh_CN.UTF-8 UTF-8/zh_CN.UTF-8 UTF-8/' /etc/locale.gen && \
@@ -76,6 +76,12 @@ COPY tests/ /app/tests/
 COPY config.example.yaml /app/config.example.yaml
 RUN --mount=type=cache,target=/root/.cache/pip \
     cd /app && /opt/venv-bot/bin/pip install --no-deps -e .
+
+ARG INSTALL_PRIVATE_CHAT_AUTO_REPLY=true
+COPY plugins/private-chat-auto-reply/ /app/plugins/private-chat-auto-reply/
+RUN if [ "$INSTALL_PRIVATE_CHAT_AUTO_REPLY" = "true" ]; then \
+        /opt/venv-bot/bin/pip install --no-deps --no-build-isolation /app/plugins/private-chat-auto-reply; \
+    fi
 
 # Keep stalonetray from reserving desktop space.
 RUN sed -i '/<dock>/,/<\/dock>/s/<noStrut>no<\/noStrut>/<noStrut>yes<\/noStrut>/' /etc/xdg/openbox/rc.xml
